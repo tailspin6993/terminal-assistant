@@ -14,6 +14,8 @@ It can generate new and interesting replies to your queries. \
 Shelby can also teach you programming and provide you with coding examples. \
 It has a user-friendly interface and is easy to use.
 
+This fork also uses encryption with the configuration file.
+
 ### How to Use
 
 Clone the repository to your local machine.
