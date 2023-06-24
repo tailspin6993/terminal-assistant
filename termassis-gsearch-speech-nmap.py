@@ -6,41 +6,143 @@ import subprocess
 from nmap3 import Nmap
 import speech_recognition as sr
 
-from configparser import ConfigParser
 import json
 
-config = ConfigParser()
-CONFIG_NAME = 'testbot_auth.ini'
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+from hashlib import blake2b
+from random import randint
+from getpass import getpass
+from struct import pack
+from base64 import b64encode, b64decode
+from hmac import compare_digest
+
+CONFIG_NAME = 'testbot_auth.json'
 
 # Config
 
+def encrypt(data, key):
+    nonce = os.urandom(16)
+    enc = Cipher(algorithms.ChaCha20(key, nonce), mode=None).encryptor()
+    return nonce + enc.update(data)
+
+def decrypt(data, key):
+    nonce = data[:16]
+    data = data[16:]
+    dec = Cipher(algorithms.ChaCha20(key, nonce), mode=None).decryptor()
+    return dec.update(data)
+
 def create_config():
+    salt = os.urandom(32)
+    iterations = randint(400_000, 1_000_000)
+
+    password = getpass('Enter password to protect config data: ').encode()
+    user_key = PBKDF2HMAC(
+        hashes.SHA512(),
+        96,
+        salt,
+        iterations
+    ).derive(password)
+
+    print('Derived keys')
+    
+    user_mk = os.urandom(96)
+
+    user_enc = user_key[:32]
+    user_mac = user_key[32:]
+    user_mk_enc = user_mk[:32]
+    user_mk_mac = user_mk[32:]
+
     openai_key = input("OpenAI API key: ")
     googleapi_api_key = input("GoogleAPI key: ")
     googleapi_search_engine_id = input("GoogleAPI search engine ID: ")
 
-    config['AUTH'] = {}
-    config['AUTH'] = {
+    config_data = {
         'openai': openai_key,
         'googleapi_key': googleapi_api_key,
         'googleapi_search_id': googleapi_search_engine_id
     }
 
+    config_data_json = json.dumps(config_data).encode()
+
+    encrypted_config_data = encrypt(config_data_json, user_mk_enc)
+    encrypted_config_sig = blake2b(encrypted_config_data, key=user_mk_mac).hexdigest()
+
+    encrypted_mk = encrypt(user_mk, user_enc)
+    encrypted_mk_sig = blake2b(encrypted_mk, key=user_mac).hexdigest()
+
+    config = {}
+    config['AUTH'] = {
+        'salt': b64encode(salt).decode(),
+        'iterations': iterations,
+        'mk': b64encode(encrypted_mk).decode(),
+        'mk_sig': encrypted_mk_sig,
+        'config': b64encode(encrypted_config_data).decode(),
+        'config_sig': encrypted_config_sig
+    }
+
     with open(CONFIG_NAME, 'w') as f:
-        config.write(f)
+        json.dump(config, f, indent=4)
+    
+    return config_data
+
+def load_config(config_data):
+    password = getpass('Password: ').encode()
+
+    config_data = config_data['AUTH']
+
+    salt = b64decode(config_data['salt'].encode())
+    iterations = config_data['iterations']
+    mk = b64decode(config_data['mk'].encode())
+    mk_sig = config_data['mk_sig']
+    config = b64decode(config_data['config'].encode())
+    config_sig = config_data['config_sig']
+
+    user_key = PBKDF2HMAC(
+        hashes.SHA512(),
+        96,
+        salt,
+        iterations
+    ).derive(password)
+
+    user_enc = user_key[:32]
+    user_mac = user_key[32:]
+
+    if not compare_digest(
+                bytes.fromhex(mk_sig), 
+                blake2b(mk, key=user_mac).digest()
+            ):
+        raise ValueError("Password is incorrect.")
+    
+    user_mk = decrypt(mk, user_enc)
+    mk_enc = user_mk[:32]
+    mk_mac = user_mk[32:]
+
+    if not compare_digest(
+                bytes.fromhex(config_sig),
+                blake2b(config, key=mk_mac).digest()
+            ):
+        raise ValueError("Config data failed HMAC verification, aborting decryption.")
+    
+    return json.loads(
+        decrypt(config, mk_enc).decode()
+    )
 
 def check_for_config():
     if os.path.exists(CONFIG_NAME):
-        config.read(CONFIG_NAME)
-        return
+        with open(CONFIG_NAME, 'r') as f:
+            config_data = json.load(f)
+        
+        return load_config(config_data)
     
-    create_config()
+    return create_config()
 
-check_for_config()
+config = check_for_config()
 
-openai.api_key = config['AUTH']['openai']
-API_KEY = config['AUTH']['googleapi_key']
-SEARCH_ENGINE_ID = config['AUTH']['googleapi_search_id']
+openai.api_key = config['openai']
+API_KEY = config['googleapi_key']
+SEARCH_ENGINE_ID = config['googleapi_search_id']
 ENDPOINT = "https://www.googleapis.com/customsearch/v1"
 
 # Define the function for interacting with the GPT model

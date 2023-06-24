@@ -5,3 +5,4 @@ openai[wandb]
 openai[datalib]
 gtts==2.3.2
 mpg123==0.4
+cryptography
